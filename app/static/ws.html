@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebSocket token stream demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      body {
+        max-width: 42rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      form {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      input[name="prompt"] {
+        flex: 1;
+        padding: 0.5rem;
+        font-size: 1rem;
+      }
+      button {
+        padding: 0.5rem 1rem;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      button[disabled] {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+      #status {
+        font-size: 0.875rem;
+        margin-bottom: 0.5rem;
+        opacity: 0.75;
+      }
+      #output {
+        min-height: 6rem;
+        padding: 0.75rem;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .token {
+        display: inline;
+      }
+      .controls {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WebSocket token stream demo</h1>
+    <p>
+      Submit a prompt and watch tokens stream over a full-duplex
+      <code>WebSocket</code>. The client opens
+      <code>/stream/ws</code>, reconnects with exponential backoff if the
+      socket drops mid-stream, and watches an application-level heartbeat so
+      a stalled connection is detected and recycled.
+    </p>
+    <form id="prompt-form" autocomplete="off">
+      <input
+        type="text"
+        name="prompt"
+        id="prompt-input"
+        value="hello there"
+        maxlength="2048"
+        required
+      />
+      <button type="submit" id="submit-button">Stream</button>
+    </form>
+    <div class="controls">
+      <button type="button" id="cancel-button" disabled>Cancel</button>
+      <button type="button" id="stop-button" disabled>Stop reconnect</button>
+    </div>
+    <div id="status" role="status" aria-live="polite">Idle.</div>
+    <div id="output" aria-live="polite"></div>
+
+    <script>
+      (function () {
+        const form = document.getElementById("prompt-form");
+        const input = document.getElementById("prompt-input");
+        const submitButton = document.getElementById("submit-button");
+        const cancelButton = document.getElementById("cancel-button");
+        const stopButton = document.getElementById("stop-button");
+        const output = document.getElementById("output");
+        const statusEl = document.getElementById("status");
+
+        const CONFIG = {
+          heartbeatIntervalMs: 5000,
+          heartbeatTimeoutMs: 12000,
+          maxReconnectAttempts: 6,
+          baseBackoffMs: 500,
+          maxBackoffMs: 15000,
+        };
+
+        const session = {
+          socket: null,
+          prompt: "",
+          attempt: 0,
+          heartbeatTimer: null,
+          watchdogTimer: null,
+          reconnectTimer: null,
+          lastFrameAt: 0,
+          terminated: false,
+          stoppedByUser: false,
+        };
+
+        function setStatus(message) {
+          statusEl.textContent = message;
+        }
+
+        function buildStreamUrl(prompt) {
+          const params = new URLSearchParams({ prompt: prompt });
+          const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+          const host = window.location.host;
+          return scheme + "://" + host + "/stream/ws?" + params.toString();
+        }
+
+        function appendToken(text) {
+          const span = document.createElement("span");
+          span.className = "token";
+          span.textContent = output.childNodes.length === 0 ? text : " " + text;
+          output.appendChild(span);
+        }
+
+        function clearTimers() {
+          if (session.heartbeatTimer !== null) {
+            clearInterval(session.heartbeatTimer);
+            session.heartbeatTimer = null;
+          }
+          if (session.watchdogTimer !== null) {
+            clearInterval(session.watchdogTimer);
+            session.watchdogTimer = null;
+          }
+          if (session.reconnectTimer !== null) {
+            clearTimeout(session.reconnectTimer);
+            session.reconnectTimer = null;
+          }
+        }
+
+        function nextBackoffMs() {
+          const delay = CONFIG.baseBackoffMs * Math.pow(2, session.attempt);
+          const jitter = Math.random() * CONFIG.baseBackoffMs;
+          return Math.min(CONFIG.maxBackoffMs, delay + jitter);
+        }
+
+        function startHeartbeat() {
+          session.lastFrameAt = Date.now();
+          session.heartbeatTimer = setInterval(function () {
+            sendHeartbeat();
+          }, CONFIG.heartbeatIntervalMs);
+          session.watchdogTimer = setInterval(function () {
+            checkHeartbeatTimeout();
+          }, CONFIG.heartbeatIntervalMs);
+        }
+
+        function sendHeartbeat() {
+          if (!session.socket) {
+            return;
+          }
+          if (session.socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          try {
+            session.socket.send(JSON.stringify({ action: "ping" }));
+          } catch (err) {
+            setStatus("Heartbeat send failed; closing socket.");
+            forceReconnect();
+          }
+        }
+
+        function checkHeartbeatTimeout() {
+          const idleMs = Date.now() - session.lastFrameAt;
+          if (idleMs < CONFIG.heartbeatTimeoutMs) {
+            return;
+          }
+          setStatus("Heartbeat timeout; reconnecting...");
+          forceReconnect();
+        }
+
+        function forceReconnect() {
+          if (!session.socket) {
+            return;
+          }
+          try {
+            session.socket.close(4000, "heartbeat-timeout");
+          } catch (err) {
+            // Browser may already be tearing the socket down; ignore.
+          }
+        }
+
+        function handleFrame(frame) {
+          session.lastFrameAt = Date.now();
+          if (frame.type === "token") {
+            appendToken(frame.data);
+            return;
+          }
+          if (frame.type === "done") {
+            setStatus("Done.");
+            session.terminated = true;
+            return;
+          }
+          if (frame.type === "cancelled") {
+            setStatus("Cancelled.");
+            session.terminated = true;
+          }
+        }
+
+        function parseMessage(raw) {
+          try {
+            return JSON.parse(raw);
+          } catch (err) {
+            return null;
+          }
+        }
+
+        function openSocket() {
+          session.socket = new WebSocket(buildStreamUrl(session.prompt));
+
+          session.socket.addEventListener("open", function () {
+            session.attempt = 0;
+            setStatus("Streaming...");
+            startHeartbeat();
+          });
+
+          session.socket.addEventListener("message", function (event) {
+            const frame = parseMessage(event.data);
+            if (frame === null) {
+              return;
+            }
+            handleFrame(frame);
+          });
+
+          session.socket.addEventListener("error", function () {
+            setStatus("Socket error; will reconnect if appropriate.");
+          });
+
+          session.socket.addEventListener("close", function (event) {
+            clearTimers();
+            session.socket = null;
+            handleClose(event);
+          });
+        }
+
+        function handleClose(event) {
+          if (session.terminated) {
+            finishSession();
+            return;
+          }
+          if (session.stoppedByUser) {
+            setStatus("Stopped.");
+            finishSession();
+            return;
+          }
+          scheduleReconnect(event);
+        }
+
+        function scheduleReconnect(event) {
+          if (session.attempt >= CONFIG.maxReconnectAttempts) {
+            setStatus("Giving up after " + session.attempt + " attempts.");
+            finishSession();
+            return;
+          }
+          session.attempt += 1;
+          const delay = nextBackoffMs();
+          const reason = event && event.reason ? " (" + event.reason + ")" : "";
+          setStatus(
+            "Reconnecting in " +
+              Math.round(delay) +
+              "ms" +
+              reason +
+              " — attempt " +
+              session.attempt
+          );
+          session.reconnectTimer = setTimeout(openSocket, delay);
+        }
+
+        function finishSession() {
+          clearTimers();
+          session.socket = null;
+          submitButton.disabled = false;
+          cancelButton.disabled = true;
+          stopButton.disabled = true;
+        }
+
+        function startStream(prompt) {
+          clearTimers();
+          if (session.socket) {
+            try {
+              session.socket.close(1000, "restart");
+            } catch (err) {
+              // Closing a not-yet-open socket can throw; safe to ignore.
+            }
+          }
+          output.textContent = "";
+          session.prompt = prompt;
+          session.attempt = 0;
+          session.terminated = false;
+          session.stoppedByUser = false;
+          submitButton.disabled = true;
+          cancelButton.disabled = false;
+          stopButton.disabled = false;
+          setStatus("Connecting...");
+          openSocket();
+        }
+
+        function requestCancel() {
+          if (!session.socket) {
+            return;
+          }
+          if (session.socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          session.socket.send(JSON.stringify({ action: "cancel" }));
+          setStatus("Cancel requested...");
+        }
+
+        function stopReconnect() {
+          session.stoppedByUser = true;
+          clearTimers();
+          if (session.socket) {
+            try {
+              session.socket.close(1000, "user-stop");
+            } catch (err) {
+              // Ignore: socket already closing.
+            }
+          }
+          finishSession();
+          setStatus("Stopped.");
+        }
+
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          const prompt = input.value.trim();
+          if (prompt.length === 0) {
+            setStatus("Enter a prompt first.");
+            return;
+          }
+          startStream(prompt);
+        });
+
+        cancelButton.addEventListener("click", function () {
+          requestCancel();
+        });
+
+        stopButton.addEventListener("click", function () {
+          stopReconnect();
+        });
+
+        window.addEventListener("beforeunload", function () {
+          stopReconnect();
+        });
+      })();
+    </script>
+  </body>
+</html>

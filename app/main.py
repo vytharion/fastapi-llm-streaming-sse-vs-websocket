@@ -1,9 +1,10 @@
 """FastAPI entrypoint.
 
 Step 1 wired up a health check, step 2 mounted the SSE streaming router,
-step 3 added the static EventSource browser client, and step 4 mounts the
-WebSocket streaming router. The WebSocket browser client follows in a later
-step.
+step 3 added the static EventSource browser client, step 4 added the
+WebSocket streaming router, and step 5 mounts a second static page — a
+WebSocket browser client with reconnect logic and an application-level
+heartbeat.
 """
 
 from __future__ import annotations

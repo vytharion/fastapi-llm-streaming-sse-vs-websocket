@@ -1,8 +1,14 @@
-"""Static browser client that consumes the SSE stream via EventSource.
+"""Static browser clients for the streaming demos.
 
-The HTML lives next to this module so it ships with the package and is reachable
-without an extra deployment step. The router exposes the page at ``/`` and the
-raw file under ``/client/index.html`` for tooling that wants a stable filename.
+Two HTML pages are bundled with the package so they ship without any extra
+deployment step:
+
+- ``index.html`` — the SSE / ``EventSource`` demo, mounted at ``/``.
+- ``ws.html`` — the WebSocket demo with reconnect + heartbeat, mounted at
+  ``/ws``.
+
+Each page is also reachable under a stable ``/client/<file>`` alias for
+tooling that wants to fetch the raw bundle by filename.
 """
 
 from __future__ import annotations
@@ -13,16 +19,19 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 
-CLIENT_HTML_PATH: Path = Path(__file__).parent / "static" / "index.html"
+STATIC_DIR: Path = Path(__file__).parent / "static"
+CLIENT_HTML_PATH: Path = STATIC_DIR / "index.html"
+WS_CLIENT_HTML_PATH: Path = STATIC_DIR / "ws.html"
 
 
 def load_client_html() -> str:
-    """Read the bundled client HTML from disk.
-
-    Kept as a function so tests can call it without spinning up the HTTP stack
-    and so future caching can slot in without touching the route handler.
-    """
+    """Read the bundled SSE client HTML from disk."""
     return CLIENT_HTML_PATH.read_text(encoding="utf-8")
+
+
+def load_ws_client_html() -> str:
+    """Read the bundled WebSocket client HTML from disk."""
+    return WS_CLIENT_HTML_PATH.read_text(encoding="utf-8")
 
 
 router = APIRouter()
@@ -40,3 +49,17 @@ async def index() -> HTMLResponse:
 )
 async def client_html() -> HTMLResponse:
     return HTMLResponse(content=load_client_html())
+
+
+@router.get("/ws", response_class=HTMLResponse, include_in_schema=False)
+async def ws_client_index() -> HTMLResponse:
+    return HTMLResponse(content=load_ws_client_html())
+
+
+@router.get(
+    "/client/ws.html",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def ws_client_html() -> HTMLResponse:
+    return HTMLResponse(content=load_ws_client_html())
