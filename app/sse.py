@@ -1,19 +1,23 @@
-"""Server-Sent Events transport for the mock LLM token stream.
+"""Server-Sent Events transport for the pluggable LLM token stream.
 
 The encoder turns a stream of opaque token strings into the wire format defined
 by the EventSource spec: lines prefixed with ``data:`` and terminated by a
 blank line. A final ``event: done`` frame lets clients distinguish a clean
 end-of-stream from a transport drop.
+
+The token source itself is injected as a ``TokenStreamer`` so the same
+transport works against the deterministic mock generator (tests, local dev)
+and against a real LLM SDK (production) without touching this module.
 """
 
 from __future__ import annotations
 
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
-from app.llm_mock import stream_tokens
+from app.llm import LLMStreamError, TokenStreamer, get_token_streamer
 
 
 SSE_MEDIA_TYPE = "text/event-stream"
@@ -42,10 +46,16 @@ def format_sse_event(data: str, event: str | None = None) -> str:
     return "\n".join(lines)
 
 
-async def sse_token_stream(prompt: str, delay_seconds: float) -> AsyncIterator[str]:
-    """Wrap the mock token generator in SSE frames + a terminal done event."""
-    async for token in stream_tokens(prompt, delay_seconds=delay_seconds):
-        yield format_sse_event(token, event="token")
+async def sse_token_stream(
+    streamer: TokenStreamer, prompt: str, delay_seconds: float
+) -> AsyncIterator[str]:
+    """Wrap a token stream in SSE frames + a terminal ``done`` / ``error`` event."""
+    try:
+        async for token in streamer.stream(prompt, delay_seconds=delay_seconds):
+            yield format_sse_event(token, event="token")
+    except LLMStreamError as exc:
+        yield format_sse_event(str(exc), event="error")
+        return
     yield format_sse_event("[DONE]", event="done")
 
 
@@ -56,9 +66,10 @@ router = APIRouter()
 async def stream_sse(
     prompt: str = Query("hello", min_length=0, max_length=2048),
     delay_seconds: float = Query(0.02, ge=0.0, le=1.0),
+    streamer: TokenStreamer = Depends(get_token_streamer),
 ) -> StreamingResponse:
     return StreamingResponse(
-        sse_token_stream(prompt, delay_seconds),
+        sse_token_stream(streamer, prompt, delay_seconds),
         media_type=SSE_MEDIA_TYPE,
         headers=SSE_STREAMING_HEADERS,
     )

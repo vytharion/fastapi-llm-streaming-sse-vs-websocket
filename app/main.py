@@ -2,9 +2,11 @@
 
 Step 1 wired up a health check, step 2 mounted the SSE streaming router,
 step 3 added the static EventSource browser client, step 4 added the
-WebSocket streaming router, and step 5 mounts a second static page — a
+WebSocket streaming router, step 5 mounted a second static page — a
 WebSocket browser client with reconnect logic and an application-level
-heartbeat.
+heartbeat — and step 6 swaps the deterministic mock generator for a
+pluggable ``TokenStreamer`` so both transports can sit in front of a real
+LLM SDK selected at startup via environment variables.
 """
 
 from __future__ import annotations

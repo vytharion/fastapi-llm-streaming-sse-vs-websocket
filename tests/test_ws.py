@@ -3,24 +3,31 @@
 from __future__ import annotations
 
 import json
+from typing import AsyncIterator
 
 import pytest
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
+from app.llm import LLMStreamError, get_token_streamer
 from app.main import app
 from app.ws import (
     CANCEL_ACTION,
     OUTCOME_CANCELLED,
     OUTCOME_DONE,
+    OUTCOME_ERROR,
     encode_cancelled_frame,
     encode_done_frame,
+    encode_error_frame,
     encode_token_frame,
     is_cancel_message,
 )
 
 
 client = TestClient(app)
+
+
+TERMINAL_FRAME_TYPES = (OUTCOME_DONE, OUTCOME_CANCELLED, OUTCOME_ERROR)
 
 
 def _drain_until_terminal(ws) -> list[dict[str, str]]:
@@ -32,7 +39,7 @@ def _drain_until_terminal(ws) -> list[dict[str, str]]:
             break
         frame = json.loads(raw)
         frames.append(frame)
-        if frame["type"] in (OUTCOME_DONE, OUTCOME_CANCELLED):
+        if frame["type"] in TERMINAL_FRAME_TYPES:
             break
     return frames
 
@@ -147,6 +154,75 @@ def test_ws_endpoint_listed_in_openapi_schema() -> None:
     schema = client.get("/openapi.json").json()
 
     assert "/stream/ws" not in schema.get("paths", {})
+
+
+def test_encode_error_frame_payload() -> None:
+    payload = json.loads(encode_error_frame("boom"))
+
+    assert payload == {"type": OUTCOME_ERROR, "data": "boom"}
+
+
+class _ScriptedStreamer:
+    name = "scripted"
+
+    def __init__(self, tokens: list[str]) -> None:
+        self._tokens = tokens
+
+    async def stream(
+        self, prompt: str, delay_seconds: float = 0.0
+    ) -> AsyncIterator[str]:
+        del prompt, delay_seconds
+        for token in self._tokens:
+            yield token
+
+
+class _BrokenStreamer:
+    name = "broken"
+
+    async def stream(
+        self, prompt: str, delay_seconds: float = 0.0
+    ) -> AsyncIterator[str]:
+        del prompt, delay_seconds
+        if False:
+            yield ""  # pragma: no cover — marks this as an async generator
+        raise LLMStreamError("upstream unavailable")
+
+
+def test_ws_endpoint_consumes_injected_streamer() -> None:
+    app.dependency_overrides[get_token_streamer] = lambda: _ScriptedStreamer(
+        ["alpha", "beta", "gamma"]
+    )
+    try:
+        with client.websocket_connect(
+            "/stream/ws?prompt=ignored&delay_seconds=0"
+        ) as ws:
+            frames = _drain_until_terminal(ws)
+    finally:
+        app.dependency_overrides.pop(get_token_streamer, None)
+
+    token_payloads = [frame["data"] for frame in frames if frame["type"] == "token"]
+    terminal = [frame for frame in frames if frame["type"] == OUTCOME_DONE]
+
+    assert token_payloads == ["alpha", "beta", "gamma"]
+    assert len(terminal) == 1
+
+
+def test_ws_endpoint_emits_error_frame_on_llm_failure() -> None:
+    app.dependency_overrides[get_token_streamer] = lambda: _BrokenStreamer()
+    try:
+        with client.websocket_connect(
+            "/stream/ws?prompt=ignored&delay_seconds=0"
+        ) as ws:
+            frames = _drain_until_terminal(ws)
+    finally:
+        app.dependency_overrides.pop(get_token_streamer, None)
+
+    error_frames = [frame for frame in frames if frame["type"] == OUTCOME_ERROR]
+    done_frames = [frame for frame in frames if frame["type"] == OUTCOME_DONE]
+
+    assert len(error_frames) == 1
+    assert "upstream unavailable" in error_frames[0]["data"]
+    assert done_frames == []
 
 
 if __name__ == "__main__":
