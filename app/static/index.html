@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SSE token stream demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      body {
+        max-width: 42rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      form {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      input[name="prompt"] {
+        flex: 1;
+        padding: 0.5rem;
+        font-size: 1rem;
+      }
+      button {
+        padding: 0.5rem 1rem;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      button[disabled] {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+      #status {
+        font-size: 0.875rem;
+        margin-bottom: 0.5rem;
+        opacity: 0.75;
+      }
+      #output {
+        min-height: 6rem;
+        padding: 0.75rem;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .token {
+        display: inline;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>SSE token stream demo</h1>
+    <p>
+      Submit a prompt and watch tokens stream in one frame at a time over
+      <code>text/event-stream</code>. The page subscribes to
+      <code>/stream/sse</code> via the browser's built-in
+      <code>EventSource</code> API.
+    </p>
+    <form id="prompt-form" autocomplete="off">
+      <input
+        type="text"
+        name="prompt"
+        id="prompt-input"
+        value="hello there"
+        maxlength="2048"
+        required
+      />
+      <button type="submit" id="submit-button">Stream</button>
+    </form>
+    <div id="status" role="status" aria-live="polite">Idle.</div>
+    <div id="output" aria-live="polite"></div>
+
+    <script>
+      (function () {
+        const form = document.getElementById("prompt-form");
+        const input = document.getElementById("prompt-input");
+        const button = document.getElementById("submit-button");
+        const output = document.getElementById("output");
+        const status = document.getElementById("status");
+
+        let activeSource = null;
+
+        function buildStreamUrl(prompt) {
+          const params = new URLSearchParams({ prompt: prompt });
+          return "/stream/sse?" + params.toString();
+        }
+
+        function appendToken(text) {
+          const span = document.createElement("span");
+          span.className = "token";
+          span.textContent = output.childNodes.length === 0 ? text : " " + text;
+          output.appendChild(span);
+        }
+
+        function teardown(source) {
+          if (source && source.readyState !== EventSource.CLOSED) {
+            source.close();
+          }
+          if (activeSource === source) {
+            activeSource = null;
+            button.disabled = false;
+          }
+        }
+
+        function startStream(prompt) {
+          if (activeSource) {
+            teardown(activeSource);
+          }
+          output.textContent = "";
+          status.textContent = "Connecting...";
+          button.disabled = true;
+
+          const source = new EventSource(buildStreamUrl(prompt));
+          activeSource = source;
+
+          source.addEventListener("open", function () {
+            status.textContent = "Streaming...";
+          });
+
+          source.addEventListener("token", function (event) {
+            appendToken(event.data);
+          });
+
+          source.addEventListener("done", function () {
+            status.textContent = "Done.";
+            teardown(source);
+          });
+
+          source.addEventListener("error", function () {
+            const closed = source.readyState === EventSource.CLOSED;
+            status.textContent = closed
+              ? "Connection closed."
+              : "Connection error, retrying...";
+            if (closed) {
+              teardown(source);
+            }
+          });
+        }
+
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          const prompt = input.value.trim();
+          if (prompt.length === 0) {
+            status.textContent = "Enter a prompt first.";
+            return;
+          }
+          startStream(prompt);
+        });
+
+        window.addEventListener("beforeunload", function () {
+          teardown(activeSource);
+        });
+      })();
+    </script>
+  </body>
+</html>
