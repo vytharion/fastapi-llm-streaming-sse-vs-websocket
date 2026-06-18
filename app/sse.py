@@ -49,13 +49,21 @@ def format_sse_event(data: str, event: str | None = None) -> str:
 async def sse_token_stream(
     streamer: TokenStreamer, prompt: str, delay_seconds: float
 ) -> AsyncIterator[str]:
-    """Wrap a token stream in SSE frames + a terminal ``done`` / ``error`` event."""
+    """Wrap a token stream in SSE frames + a terminal ``done`` / ``error`` event.
+
+    The inner iterator is explicitly closed in ``finally`` so an early consumer
+    drop (browser navigation, proxy timeout, CDN tear-down) propagates upstream
+    immediately rather than waiting for the async-generator finalizer.
+    """
+    iterator = streamer.stream(prompt, delay_seconds=delay_seconds)
     try:
-        async for token in streamer.stream(prompt, delay_seconds=delay_seconds):
+        async for token in iterator:
             yield format_sse_event(token, event="token")
     except LLMStreamError as exc:
         yield format_sse_event(str(exc), event="error")
         return
+    finally:
+        await iterator.aclose()
     yield format_sse_event("[DONE]", event="done")
 
 

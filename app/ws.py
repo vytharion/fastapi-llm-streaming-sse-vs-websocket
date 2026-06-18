@@ -85,14 +85,22 @@ async def _push_tokens(
     prompt: str,
     delay_seconds: float,
 ) -> str | _StreamFailure:
-    """Stream tokens until generator drains or the peer drops the socket."""
+    """Stream tokens until generator drains or the peer drops the socket.
+
+    The upstream iterator is explicitly closed in ``finally`` so a dropped
+    socket immediately tears down the LLM stream — no waiting on async-gen
+    finalisation, no risk of a billable model continuing past the client.
+    """
+    iterator = streamer.stream(prompt, delay_seconds=delay_seconds)
     try:
-        async for token in streamer.stream(prompt, delay_seconds=delay_seconds):
+        async for token in iterator:
             await websocket.send_text(encode_token_frame(token))
     except WebSocketDisconnect:
         return OUTCOME_DISCONNECTED
     except LLMStreamError as exc:
         return _StreamFailure(str(exc))
+    finally:
+        await iterator.aclose()
     return OUTCOME_DONE
 
 
