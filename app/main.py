@@ -1,8 +1,9 @@
 """FastAPI entrypoint.
 
-Step 1 wired up a health check, step 2 mounted the SSE streaming router, and
-step 3 adds the static browser client that consumes the stream via
-``EventSource``. The WebSocket endpoint follows in a later step.
+Step 1 wired up a health check, step 2 mounted the SSE streaming router,
+step 3 added the static EventSource browser client, and step 4 mounts the
+WebSocket streaming router. The WebSocket browser client follows in a later
+step.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from fastapi import FastAPI
 from app import __version__
 from app.client import router as client_router
 from app.sse import router as sse_router
+from app.ws import router as ws_router
 
 
 app = FastAPI(
@@ -21,6 +23,7 @@ app = FastAPI(
 )
 
 app.include_router(sse_router)
+app.include_router(ws_router)
 app.include_router(client_router)
 
 
